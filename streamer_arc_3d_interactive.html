@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>J0438 Arc 3D Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Arial, Helvetica, sans-serif;
+      background: #f6f3ef;
+      color: #1f2428;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    header {
+      padding: 14px 18px 10px;
+      border-bottom: 1px solid #d9d2c8;
+      background: #fffaf3;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 24px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid #a9a096;
+      background: #ffffff;
+      color: #202020;
+      padding: 7px 11px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 17px;
+    }
+    button.active {
+      background: #7f1d1d;
+      color: white;
+      border-color: #7f1d1d;
+    }
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 17px;
+      white-space: nowrap;
+    }
+    input[type="range"] {
+      width: 130px;
+    }
+    main {
+      position: relative;
+      min-height: 0;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #fbf8f2;
+      cursor: grab;
+      touch-action: none;
+    }
+    canvas:active {
+      cursor: grabbing;
+    }
+    .legend {
+      position: absolute;
+      right: 18px;
+      top: 18px;
+      width: 185px;
+      padding: 10px;
+      border: 1px solid #d0c8bd;
+      background: rgba(255, 250, 243, 0.9);
+      border-radius: 6px;
+      font-size: 17px;
+      pointer-events: none;
+    }
+    .bar {
+      height: 12px;
+      border-radius: 3px;
+      background: linear-gradient(90deg, #fff5f0, #fb6a4a, #67000d);
+      border: 1px solid #b6a69d;
+      margin: 7px 0 5px;
+    }
+    .scale {
+      display: flex;
+      justify-content: space-between;
+    }
+    .note {
+      position: absolute;
+      right: 18px;
+      bottom: 16px;
+      max-width: min(440px, calc(100% - 60px));
+      padding: 9px 11px;
+      background: rgba(255, 250, 243, 0.9);
+      border: 1px solid #d0c8bd;
+      border-radius: 6px;
+      font-size: 16px;
+      line-height: 1.35;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>J0438 Arc: Interactive 3D Flow-Direction Schematic</h1>
+    <div class="toolbar">
+      <button id="swne" class="active">SW → NE</button>
+      <button id="nesw">NE → SW</button>
+      <button id="play">Pause</button>
+      <button id="reset">Reset View</button>
+      <button id="sky">Sky View (N up, E left)</button>
+      <label>Particles <input id="particles" type="range" min="8" max="70" value="34"></label>
+      <label>Speed <input id="speed" type="range" min="0" max="100" value="45"></label>
+    </div>
+  </header>
+  <main>
+    <canvas id="scene"></canvas>
+    <div class="legend">
+      <strong>LOS velocity</strong>
+      <div class="bar"></div>
+      <div class="scale"><span>+0.6</span><span>+1.6 km/s</span></div>
+      <div>redder = more receding</div>
+    </div>
+    <div class="note">
+      Sky curvature is approximated from channel maps, not an orbit fit.
+      LOS depth is assumed; redshift does not determine distance. Particle motion is schematic.
+      +z points away from the observer.
+      Dark blue marks the approximate bright cloud region; dashed blue marks a hypothetical supply path.
+      Bright region: (+5", -8"), adopting 140 pc. Outer cloud boundary is approximate beyond the FOV.
+    </div>
+  </main>
+  <script>
+    const canvas = document.getElementById("scene");
+    const ctx = canvas.getContext("2d");
+    const swne = document.getElementById("swne");
+    const nesw = document.getElementById("nesw");
+    const playBtn = document.getElementById("play");
+    const resetBtn = document.getElementById("reset");
+    const particlesSlider = document.getElementById("particles");
+    const speedSlider = document.getElementById("speed");
+
+    let W = 1;
+    let H = 1;
+    let yaw = -0.86;
+    let pitch = 0.38;
+    let zoom = 0.62;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    let reverse = false;
+    let playing = true;
+    let phase = 0;
+    let lastT = 0;
+
+    const VMIN = 0.6;
+    const VMAX = 1.6;
+    const PA = 29.2 * Math.PI / 180;
+    const INC = 80.0 * Math.PI / 180;
+    const DIST_PC = 140;
+    // CO moment-0 radial edge is a size proxy, not a fitted outer radius.
+    const RD = 0.45 * DIST_PC;
+    const ARC_SCALE = DIST_PC / 310;
+    const SIDE_LABEL_OFFSET = [-100, -65];
+    const CLOUD_BRIGHT = [5 * DIST_PC, -8 * DIST_PC, 114];
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      W = Math.max(1, Math.floor(rect.width * dpr));
+      H = Math.max(1, Math.floor(rect.height * dpr));
+      canvas.width = W;
+      canvas.height = H;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      W = rect.width;
+      H = rect.height;
+    }
+
+    function arc(u) {
+      // Approximate narrow ridge, independently of the broad SE cloud.
+      const c = u < 0.5
+        ? [[-60,-620],[-95,-400],[-90,-165],[0,0]]
+        : [[0,0],[90,165],[255,325],[480,420]];
+      const t = u < 0.5 ? 2*u : 2*u-1;
+      const b = [(1-t)**3, 3*(1-t)**2*t, 3*(1-t)*t*t, t**3];
+      const x = ARC_SCALE * c.reduce((s,p,i) => s+b[i]*p[0], 0);
+      const y = ARC_SCALE * c.reduce((s,p,i) => s+b[i]*p[1], 0);
+      const z = ARC_SCALE * (110 + 620 * u + 35 * Math.sin(Math.PI * u));
+      return [x, y, z];
+    }
+
+    function vlos(u) {
+      return 0.75 + 0.75 * u + 0.08 * Math.sin(2 * Math.PI * u);
+    }
+
+    function colorForV(v, alpha = 1) {
+      const t = Math.max(0, Math.min(1, (v - VMIN) / (VMAX - VMIN)));
+      const stops = [
+        [255, 245, 240],
+        [251, 106, 74],
+        [103, 0, 13]
+      ];
+      const a = t < 0.5 ? 0 : 1;
+      const f = t < 0.5 ? t * 2 : (t - 0.5) * 2;
+      const c0 = stops[a];
+      const c1 = stops[a + 1];
+      const r = Math.round(c0[0] + (c1[0] - c0[0]) * f);
+      const g = Math.round(c0[1] + (c1[1] - c0[1]) * f);
+      const b = Math.round(c0[2] + (c1[2] - c0[2]) * f);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function rotate(p) {
+      let [x, y, z] = p;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const x1 = cy * x + sy * z;
+      const z1 = -sy * x + cy * z;
+      const y1 = cp * y - sp * z1;
+      const z2 = sp * y + cp * z1;
+      return [x1, y1, z2];
+    }
+
+    function project(p) {
+      const [x, y, z] = rotate(p);
+      const scale = zoom * Math.min(W, H) / 2200;
+      return [W * 0.5 + x * scale, H * 0.40 - y * scale, z];
+    }
+
+    function line3(a, b, style) {
+      const pa = project(a);
+      const pb = project(b);
+      ctx.strokeStyle = style.color || "#444";
+      ctx.lineWidth = style.width || 1;
+      ctx.setLineDash(style.dash || []);
+      ctx.beginPath();
+      ctx.moveTo(pa[0], pa[1]);
+      ctx.lineTo(pb[0], pb[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function label3(text, p, color = "#222", size = 13, offset = null) {
+      const q = project(p);
+      ctx.save();
+      ctx.font = `${size + 4}px Arial`;
+      const width = ctx.measureText(text).width;
+      const x = Math.max(12, Math.min(W - width - 12, q[0] + (offset ? offset[0] : 0)));
+      const y = Math.max(24, Math.min(H - 24, q[1] + (offset ? offset[1] : 0)));
+      if (offset) {
+        ctx.beginPath();
+        ctx.moveTo(q[0], q[1]);
+        ctx.lineTo(x, y - 7);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.strokeStyle = "#fbf8f2";
+      ctx.lineWidth = 4;
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+      ctx.restore();
+    }
+
+    function diskPoints() {
+      const emaj = [Math.sin(PA), Math.cos(PA), 0];
+      const emin = [-Math.cos(INC) * Math.cos(PA), Math.cos(INC) * Math.sin(PA), -Math.sin(INC)];
+      const pts = [];
+      for (let i = 0; i < 90; i++) {
+        const th = 2 * Math.PI * i / 90;
+        pts.push([
+          RD * Math.cos(th) * emaj[0] + RD * Math.sin(th) * emin[0],
+          RD * Math.cos(th) * emaj[1] + RD * Math.sin(th) * emin[1],
+          RD * Math.cos(th) * emaj[2] + RD * Math.sin(th) * emin[2]
+        ]);
+      }
+      return pts;
+    }
+
+    const disk = diskPoints();
+
+    function drawPolygon(points, fill, stroke) {
+      const pp = points.map(project);
+      ctx.beginPath();
+      ctx.moveTo(pp[0][0], pp[0][1]);
+      for (let i = 1; i < pp.length; i++) ctx.lineTo(pp[i][0], pp[i][1]);
+      ctx.closePath();
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill();
+      }
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    function cloudPoints(bright = false) {
+      const pts = [];
+      const angle = -60 * Math.PI / 180;
+      const ca = Math.cos(angle), sa = Math.sin(angle);
+      for (let i = 0; i < 90; i++) {
+        const th = 2 * Math.PI * i / 90;
+        const x = (bright ? 1.5 : 6.0) * DIST_PC * Math.cos(th);
+        const y = (bright ? 1.05 : 3.3) * DIST_PC * Math.sin(th);
+        pts.push([
+          (bright ? CLOUD_BRIGHT[0] : 4.0 * DIST_PC) + x * ca - y * sa,
+          (bright ? CLOUD_BRIGHT[1] : -4.5 * DIST_PC) + x * sa + y * ca,
+          bright ? 114 : 110
+        ]);
+      }
+      return pts;
+    }
+
+    const cloud = cloudPoints();
+    const brightCloud = cloudPoints(true);
+
+    function drawCloudConnection() {
+      if (reverse) return;
+      const end = arc(0.15), near = arc(0.1501);
+      const c = [CLOUD_BRIGHT, [350,-950,115],
+        end.map((v,i) => v-0.12*(near[i]-v)/0.0001), end];
+      ctx.beginPath();
+      for (let i = 0; i <= 100; i++) {
+        const t = i/100;
+        const b = [(1-t)**3,3*(1-t)**2*t,3*(1-t)*t*t,t**3];
+        const p = project([0,1,2].map(k => c.reduce((s,v,j) => s+b[j]*v[k],0)));
+        if (i === 0) ctx.moveTo(p[0],p[1]);
+        else ctx.lineTo(p[0],p[1]);
+      }
+      ctx.strokeStyle = '#245878';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([7,5]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function drawAxes() {
+      line3([0,0,0], [520,0,0], {color:"#6b6b6b", width:1.5});
+      line3([0,0,0], [0,520,0], {color:"#6b6b6b", width:1.5});
+      line3([0,0,0], [0,0,620], {color:"#6b6b6b", width:1.5});
+      label3("+E", [560,0,0], "#444", 13);
+      label3("+N", [0,560,0], "#444", 13);
+      label3("+LOS away", [0,0,660], "#444", 13);
+      line3([640, 520, -420], [640, 520, -620], {color:"#111", width:2});
+      label3("to observer", [650, 520, -650], "#111", 13);
+    }
+
+    function drawArc() {
+      const n = 180;
+      let prev = arc(0);
+      for (let i = 1; i <= n; i++) {
+        const u = i / n;
+        const now = arc(u);
+        line3(prev, now, {color: colorForV(vlos(u), 0.95), width: 2.5});
+        line3([prev[0], prev[1], -520], [now[0], now[1], -520],
+          {color: "rgba(100,100,100,0.22)", width: 1.2, dash: [5, 5]});
+        prev = now;
+      }
+    }
+
+    function particleU(i, n) {
+      let base = (phase + i / n) % 1;
+      let shaped = Math.pow(base, 0.85);
+      return reverse ? 1 - shaped : shaped;
+    }
+
+    function drawStar() {
+      const p = project([0,0,0]);
+      ctx.save();
+      ctx.translate(p[0], p[1]);
+      ctx.fillStyle = "#ffd400";
+      ctx.strokeStyle = "#111";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? 4 : 1.8;
+        const a = -Math.PI / 2 + i * Math.PI / 5;
+        ctx.lineTo(r * Math.cos(a), r * Math.sin(a));
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawParticles() {
+      const n = Number(particlesSlider.value);
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const u = particleU(i, n);
+        const p = arc(u);
+        const pr = project(p);
+        pts.push({u, p, pr});
+      }
+      pts.sort((a, b) => a.pr[2] - b.pr[2]);
+      for (const obj of pts) {
+        const v = vlos(obj.u);
+        ctx.beginPath();
+        ctx.arc(obj.pr[0], obj.pr[1], 2.5, 0, 2 * Math.PI);
+        ctx.fillStyle = colorForV(v, 1);
+        ctx.strokeStyle = "#111";
+        ctx.lineWidth = 0.9;
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    function drawTitle() {
+      ctx.fillStyle = "#1f2428";
+      ctx.font = "bold 22px Arial";
+      const txt = reverse ? "Scenario B: NE -> SW late infall" : "Scenario A: SW -> NE late infall";
+      ctx.fillText(txt, 18, 30);
+      ctx.font = "18px Arial";
+      ctx.fillText("Same redshifted 3D arc; only the material flow direction changes.", 18, 52);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#fbf8f2";
+      ctx.fillRect(0, 0, W, H);
+      drawAxes();
+      drawPolygon(cloud, "rgba(135,206,235,0.24)", "rgba(70,130,180,0.35)");
+      drawPolygon(brightCloud, "rgba(45,105,150,0.60)", null);
+      drawPolygon(disk, "rgba(120,120,120,0.45)", "rgba(30,30,30,0.65)");
+      drawCloudConnection();
+      drawArc();
+      drawStar();
+      drawParticles();
+      label3("disk", [0,0,0], "#303030", 14, [85,35]);
+      label3('SE bright region (approx. +5", -8")', [700,-1380,130], "#4682b4", 13);
+      label3("NE side: more redshifted", arc(1), "#b22222", 14, SIDE_LABEL_OFFSET);
+      label3("SW side: less redshifted", arc(0), "#cd5c5c", 14,
+        SIDE_LABEL_OFFSET.map(v => -v));
+      drawTitle();
+    }
+
+    function animate(t) {
+      if (!lastT) lastT = t;
+      const dt = (t - lastT) / 1000;
+      lastT = t;
+      if (playing) {
+        const speed = Number(speedSlider.value) / 100;
+        phase = (phase + dt * (0.02 + 0.18 * speed)) % 1;
+      }
+      draw();
+      requestAnimationFrame(animate);
+    }
+
+    function setDirection(nextReverse) {
+      reverse = nextReverse;
+      swne.classList.toggle("active", !reverse);
+      nesw.classList.toggle("active", reverse);
+    }
+
+    swne.addEventListener("click", () => setDirection(false));
+    nesw.addEventListener("click", () => setDirection(true));
+    playBtn.addEventListener("click", () => {
+      playing = !playing;
+      playBtn.textContent = playing ? "Pause" : "Play";
+    });
+    resetBtn.addEventListener("click", () => {
+      yaw = -0.86;
+      pitch = 0.38;
+      zoom = 0.62;
+    });
+    document.getElementById("sky").addEventListener("click", () => {
+      yaw = Math.PI;
+      pitch = 0;
+      zoom = 0.85;
+    });
+
+    canvas.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      yaw += dx * 0.008;
+      pitch += dy * 0.008;
+      pitch = Math.max(-1.35, Math.min(1.35, pitch));
+    });
+    canvas.addEventListener("pointerup", () => { dragging = false; });
+    canvas.addEventListener("pointercancel", () => { dragging = false; });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      zoom *= Math.exp(-e.deltaY * 0.001);
+      zoom = Math.max(0.25, Math.min(1.8, zoom));
+    }, {passive: false});
+
+    window.addEventListener("resize", resize);
+    resize();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
