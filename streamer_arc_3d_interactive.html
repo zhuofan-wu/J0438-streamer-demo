@@ -120,19 +120,20 @@
       <button id="play">Pause</button>
       <button id="reset">Reset View</button>
       <button id="sky">Sky View (N up, E left)</button>
+      <button id="annotations" class="active">Hide Labels/Guides</button>
       <label>Particles <input id="particles" type="range" min="8" max="70" value="34"></label>
       <label>Speed <input id="speed" type="range" min="0" max="100" value="45"></label>
     </div>
   </header>
   <main>
     <canvas id="scene"></canvas>
-    <div class="legend">
+    <div id="legend" class="legend">
       <strong>LOS velocity</strong>
       <div class="bar"></div>
       <div class="scale"><span>+0.6</span><span>+1.6 km/s</span></div>
       <div>redder = more receding</div>
     </div>
-    <div class="note">
+    <div id="note" class="note">
       Sky curvature is approximated from channel maps, not an orbit fit.
       LOS depth is assumed; redshift does not determine distance. Particle motion is schematic.
       +z points away from the observer.
@@ -147,6 +148,9 @@
     const nesw = document.getElementById("nesw");
     const playBtn = document.getElementById("play");
     const resetBtn = document.getElementById("reset");
+    const annotationsBtn = document.getElementById("annotations");
+    const legendBox = document.getElementById("legend");
+    const noteBox = document.getElementById("note");
     const particlesSlider = document.getElementById("particles");
     const speedSlider = document.getElementById("speed");
 
@@ -160,6 +164,7 @@
     let lastY = 0;
     let reverse = false;
     let playing = true;
+    let showAnnotations = true;
     let phase = 0;
     let lastT = 0;
 
@@ -251,6 +256,7 @@
     }
 
     function label3(text, p, color = "#222", size = 13, offset = null) {
+      if (!showAnnotations) return;
       const q = project(p);
       ctx.save();
       ctx.font = `${size + 4}px Arial`;
@@ -328,10 +334,11 @@
     const brightCloud = cloudPoints(true);
 
     function drawCloudConnection() {
-      if (reverse) return;
+      if (!showAnnotations) return;
       const end = arc(0.15), near = arc(0.1501);
-      const c = [CLOUD_BRIGHT, [350,-950,115],
+      let c = [CLOUD_BRIGHT, [350,-950,115],
         end.map((v,i) => v-0.12*(near[i]-v)/0.0001), end];
+      if (reverse) c = c.slice().reverse();
       ctx.beginPath();
       for (let i = 0; i <= 100; i++) {
         const t = i/100;
@@ -365,8 +372,10 @@
         const u = i / n;
         const now = arc(u);
         line3(prev, now, {color: colorForV(vlos(u), 0.95), width: 2.5});
-        line3([prev[0], prev[1], -520], [now[0], now[1], -520],
-          {color: "rgba(100,100,100,0.22)", width: 1.2, dash: [5, 5]});
+        if (showAnnotations) {
+          line3([prev[0], prev[1], -520], [now[0], now[1], -520],
+            {color: "rgba(100,100,100,0.22)", width: 1.2, dash: [5, 5]});
+        }
         prev = now;
       }
     }
@@ -470,6 +479,13 @@
     playBtn.addEventListener("click", () => {
       playing = !playing;
       playBtn.textContent = playing ? "Pause" : "Play";
+    });
+    annotationsBtn.addEventListener("click", () => {
+      showAnnotations = !showAnnotations;
+      annotationsBtn.classList.toggle("active", showAnnotations);
+      annotationsBtn.textContent = showAnnotations ? "Hide Labels/Guides" : "Show Labels/Guides";
+      legendBox.style.display = showAnnotations ? "block" : "none";
+      noteBox.style.display = showAnnotations ? "block" : "none";
     });
     resetBtn.addEventListener("click", () => {
       yaw = -0.86;
