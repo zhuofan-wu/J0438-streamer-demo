@@ -118,10 +118,9 @@
       <button id="swne" class="active">SW → NE</button>
       <button id="nesw">NE → SW</button>
       <button id="play">Pause</button>
-      <button id="reset">Reset View</button>
       <button id="sky">Sky View (N up, E left)</button>
       <button id="annotations" class="active">Hide Labels/Guides</button>
-      <label>Particles <input id="particles" type="range" min="8" max="70" value="34"></label>
+      <label>Particles <input id="particles" type="range" min="1" max="25" value="10"></label>
       <label>Speed <input id="speed" type="range" min="0" max="100" value="45"></label>
     </div>
   </header>
@@ -147,7 +146,6 @@
     const swne = document.getElementById("swne");
     const nesw = document.getElementById("nesw");
     const playBtn = document.getElementById("play");
-    const resetBtn = document.getElementById("reset");
     const annotationsBtn = document.getElementById("annotations");
     const legendBox = document.getElementById("legend");
     const noteBox = document.getElementById("note");
@@ -156,9 +154,9 @@
 
     let W = 1;
     let H = 1;
-    let yaw = -0.86;
-    let pitch = 0.38;
-    let zoom = 0.62;
+    let yaw = Math.PI;
+    let pitch = 0;
+    let zoom = 0.85;
     let dragging = false;
     let lastX = 0;
     let lastY = 0;
@@ -177,7 +175,7 @@
     const RD = 0.45 * DIST_PC;
     const ARC_SCALE = DIST_PC / 310;
     const SIDE_LABEL_OFFSET = [-100, -65];
-    const CLOUD_BRIGHT = [5 * DIST_PC, -8 * DIST_PC, 114];
+    const CLOUD_BRIGHT = [5 * DIST_PC, -8 * DIST_PC, -110];
 
     function resize() {
       const rect = canvas.getBoundingClientRect();
@@ -200,7 +198,9 @@
       const b = [(1-t)**3, 3*(1-t)**2*t, 3*(1-t)*t*t, t**3];
       const x = ARC_SCALE * c.reduce((s,p,i) => s+b[i]*p[0], 0);
       const y = ARC_SCALE * c.reduce((s,p,i) => s+b[i]*p[1], 0);
-      const z = ARC_SCALE * (110 + 620 * u + 35 * Math.sin(Math.PI * u));
+      const q = u - 0.5;
+      const zRaw = 680 * q + 120 * q * q * q;
+      const z = ARC_SCALE * zRaw;
       return [x, y, z];
     }
 
@@ -324,7 +324,7 @@
         pts.push([
           (bright ? CLOUD_BRIGHT[0] : 4.0 * DIST_PC) + x * ca - y * sa,
           (bright ? CLOUD_BRIGHT[1] : -4.5 * DIST_PC) + x * sa + y * ca,
-          bright ? 114 : 110
+          bright ? CLOUD_BRIGHT[2] : -110
         ]);
       }
       return pts;
@@ -336,7 +336,7 @@
     function drawCloudConnection() {
       if (!showAnnotations) return;
       const end = arc(0.15), near = arc(0.1501);
-      let c = [CLOUD_BRIGHT, [350,-950,115],
+      let c = [CLOUD_BRIGHT, [350,-950,-112],
         end.map((v,i) => v-0.12*(near[i]-v)/0.0001), end];
       if (reverse) c = c.slice().reverse();
       ctx.beginPath();
@@ -380,6 +380,38 @@
       }
     }
 
+    function drawArrowHead(from, to, color, size = 20, alphaStroke = 0.65) {
+      const a = project(from);
+      const b = project(to);
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+      const len = size;
+      ctx.save();
+      ctx.translate(b[0], b[1]);
+      ctx.rotate(ang);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-len, -len * 0.42);
+      ctx.lineTo(-len * 0.72, 0);
+      ctx.lineTo(-len, len * 0.42);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = `rgba(40,20,20,${alphaStroke})`;
+      ctx.lineWidth = 1.25;
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawFlowArrows() {
+      const us = [0.16, 0.32, 0.50, 0.68, 0.84];
+      const du = 0.052;
+      for (const u of us) {
+        const u0 = reverse ? Math.min(1, u + du) : Math.max(0, u - du);
+        const u1 = reverse ? Math.max(0, u - du) : Math.min(1, u + du);
+        drawArrowHead(arc(u0), arc(u1), colorForV(vlos(u), 0.92), 20, 0.65);
+      }
+    }
+
     function particleU(i, n) {
       let base = (phase + i / n) % 1;
       let shaped = Math.pow(base, 0.85);
@@ -416,14 +448,26 @@
       }
       pts.sort((a, b) => a.pr[2] - b.pr[2]);
       for (const obj of pts) {
-        const v = vlos(obj.u);
-        ctx.beginPath();
-        ctx.arc(obj.pr[0], obj.pr[1], 2.5, 0, 2 * Math.PI);
-        ctx.fillStyle = colorForV(v, 1);
-        ctx.strokeStyle = "#111";
-        ctx.lineWidth = 0.9;
-        ctx.fill();
-        ctx.stroke();
+        const trail = [];
+        for (let k = 18; k >= 0; k--) {
+          const lag = 0.008 * k;
+          const tu = reverse ? obj.u + lag : obj.u - lag;
+          if (tu < 0 || tu > 1) continue;
+          trail.push({u: tu, pr: project(arc(tu))});
+        }
+        for (let k = 1; k < trail.length; k++) {
+          const a = trail[k - 1], b = trail[k];
+          const f = k / Math.max(1, trail.length - 1);
+          ctx.beginPath();
+          ctx.moveTo(a.pr[0], a.pr[1]);
+          ctx.lineTo(b.pr[0], b.pr[1]);
+          ctx.strokeStyle = colorForV(vlos(b.u), 0.06 + 0.30 * f);
+          ctx.lineWidth = 1.1 + 2.4 * f;
+          ctx.lineCap = "round";
+          ctx.stroke();
+        }
+        const headBack = reverse ? Math.min(1, obj.u + 0.035) : Math.max(0, obj.u - 0.035);
+        drawArrowHead(arc(headBack), obj.p, colorForV(vlos(obj.u), 1), 13, 0.72);
       }
     }
 
@@ -462,7 +506,7 @@
       lastT = t;
       if (playing) {
         const speed = Number(speedSlider.value) / 100;
-        phase = (phase + dt * (0.02 + 0.18 * speed)) % 1;
+        phase = (phase + dt * (0.012 + 0.10 * speed)) % 1;
       }
       draw();
       requestAnimationFrame(animate);
@@ -486,11 +530,6 @@
       annotationsBtn.textContent = showAnnotations ? "Hide Labels/Guides" : "Show Labels/Guides";
       legendBox.style.display = showAnnotations ? "block" : "none";
       noteBox.style.display = showAnnotations ? "block" : "none";
-    });
-    resetBtn.addEventListener("click", () => {
-      yaw = -0.86;
-      pitch = 0.38;
-      zoom = 0.62;
     });
     document.getElementById("sky").addEventListener("click", () => {
       yaw = Math.PI;
